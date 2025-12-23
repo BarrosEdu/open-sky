@@ -1,0 +1,93 @@
+version: "3.9"
+
+networks:
+  internal:
+    driver: bridge
+
+services:
+  # ----------------------------
+  # NGINX (ÚNICO EXPOSTO)
+  # ----------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: opensky-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    networks:
+      - internal
+    restart: always
+
+  # ----------------------------
+  # API (FastAPI) - INTERNA
+  # ----------------------------
+  api:
+    build:
+      context: .
+      dockerfile: app/Dockerfile.api
+    container_name: opensky-api
+    expose:
+      - "8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      - redis
+    networks:
+      - internal
+    restart: always
+
+  # ----------------------------
+  # Redis - INTERNO
+  # ----------------------------
+  redis:
+    image: redis:7
+    container_name: opensky-redis
+    expose:
+      - "6379"
+    networks:
+      - internal
+    restart: always
+
+  # ----------------------------
+  # Ingest (OpenSky → Parquet)
+  # ----------------------------
+  ingest:
+    build:
+      context: .
+      dockerfile: ingestion/Dockerfile.ingest
+    container_name: opensky-ingest
+    volumes:
+      - ./ingestion/data:/data
+    environment:
+      OPENSKY_OUT_DIR: "/data/bronze/open_sky"
+      OPENSKY_POLL_SECONDS: "10"
+      OPENSKY_FLUSH_ROWS: "20000"
+      OPENSKY_FLUSH_SECONDS: "30"
+      OPENSKY_PARQUET_COMPRESSION: "snappy"
+    networks:
+      - internal
+    restart: always
+
+  # ----------------------------
+  # Loader (Parquet → Redis)
+  # ----------------------------
+  loader:
+    build:
+      context: .
+      dockerfile: loader/Dockerfile.loader
+    container_name: opensky-loader
+    volumes:
+      - ./ingestion/data:/data
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+    depends_on:
+      - redis
+      - ingest
+    networks:
+      - internal
+    restart: always
