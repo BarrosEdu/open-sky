@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import logging
 import os
@@ -8,45 +9,42 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
+from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from azure.storage.blob import BlobServiceClient
 
-from dotenv import load_dotenv
-
+# -------------------------------------------------
+# Environment
+# -------------------------------------------------
 load_dotenv()
-# ----------------------------
+
+# -------------------------------------------------
 # Config
-# ----------------------------
+# -------------------------------------------------
 @dataclass(frozen=True)
 class Config:
+    # OpenSky
     url: str = "https://opensky-network.org/api/states/all"
-
-    # polling
     poll_seconds: float = float(os.getenv("OPENSKY_POLL_SECONDS", "10"))
     timeout_seconds: float = float(os.getenv("OPENSKY_TIMEOUT_SECONDS", "25"))
 
-    # storage (bronze)
-    out_dir: Path = Path(os.getenv("OPENSKY_OUT_DIR", "./data/bronze/open_sky"))
-    # flush policy
-    flush_rows: int = int(os.getenv("OPENSKY_FLUSH_ROWS", "20000"))  # rows buffered -> flush
-    flush_seconds: float = float(os.getenv("OPENSKY_FLUSH_SECONDS", "30"))  # max seconds between flush
+    # Flush policy
+    flush_rows: int = int(os.getenv("OPENSKY_FLUSH_ROWS", "20000"))
+    flush_seconds: float = float(os.getenv("OPENSKY_FLUSH_SECONDS", "30"))
 
-    # optional: store raw snapshots (for replay/debug)
-    raw_dir: Optional[Path] = (
-        Path(os.getenv("OPENSKY_RAW_DIR")) if os.getenv("OPENSKY_RAW_DIR") else None
-    )
+    # Azure Blob
+    blob_container: str = os.getenv("AZURE_BLOB_CONTAINER", "bronze")
+    blob_prefix: str = os.getenv("OPENSKY_BLOB_PREFIX", "open_sky")
+    parquet_compression: str = os.getenv("OPENSKY_PARQUET_COMPRESSION", "snappy")
 
-    # auth (optional; OpenSky may rate-limit unauth)
+    # Auth (optional)
     username: Optional[str] = os.getenv("OPENSKY_USERNAME")
     password: Optional[str] = os.getenv("OPENSKY_PASSWORD")
-
-    # parquet compression
-    parquet_compression: str = os.getenv("OPENSKY_PARQUET_COMPRESSION", "snappy")
 
 
 COLUMNS = [
@@ -69,18 +67,20 @@ COLUMNS = [
     "position_source",
 ]
 
-# ----------------------------
-# Logging (structured-ish)
-# ----------------------------
+# -------------------------------------------------
+# Logging
+# -------------------------------------------------
 def setup_logger() -> logging.Logger:
     logger = logging.getLogger("opensky_ingest")
     logger.setLevel(logging.INFO)
+
     handler = logging.StreamHandler(sys.stdout)
     formatter = logging.Formatter(
-        fmt="%(asctime)sZ %(levelname)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S",
+        "%(asctime)sZ %(levelname)s %(message)s",
+        "%Y-%m-%dT%H:%M:%S",
     )
     handler.setFormatter(formatter)
+
     logger.handlers.clear()
     logger.addHandler(handler)
     logger.propagate = False
@@ -89,29 +89,25 @@ def setup_logger() -> logging.Logger:
 
 LOGGER = setup_logger()
 
-
-# ----------------------------
+# -------------------------------------------------
 # Graceful shutdown
-# ----------------------------
+# -------------------------------------------------
 _STOP = False
 
 
 def _handle_stop(sig, frame):
     global _STOP
     _STOP = True
-    LOGGER.warning("signal_received=%s action=stop_requested", sig)
+    LOGGER.warning("event=signal_received signal=%s", sig)
 
 
 signal.signal(signal.SIGINT, _handle_stop)
 signal.signal(signal.SIGTERM, _handle_stop)
 
-
-# ----------------------------
-# HTTP session w/ retries
-# ----------------------------
+# -------------------------------------------------
+# HTTP session
+# -------------------------------------------------
 def build_session() -> requests.Session:
-    session = requests.Session()
-
     retry = Retry(
         total=5,
         connect=5,
@@ -121,85 +117,96 @@ def build_session() -> requests.Session:
         allowed_methods=["GET"],
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(max_retries=retry, pool_connections=10, pool_maxsize=10)
+
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
     session.mount("https://", adapter)
     session.mount("http://", adapter)
-
     session.headers.update({"User-Agent": "opensky-ingest/1.0"})
     return session
 
 
-# ----------------------------
-# Utilities
-# ----------------------------
+# -------------------------------------------------
+# Azure Blob
+# -------------------------------------------------
+def azure_blob_container(container_name: str):
+    conn_str = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+    if not conn_str:
+        raise RuntimeError("AZURE_STORAGE_CONNECTION_STRING not set")
+
+    service = BlobServiceClient.from_connection_string(conn_str)
+    container = service.get_container_client(container_name)
+
+    try:
+        container.create_container()
+        LOGGER.info("event=container_created name=%s", container_name)
+    except Exception:
+        pass  # already exists
+
+    return container
+
+
+# -------------------------------------------------
+# Helpers
+# -------------------------------------------------
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def partition_path(base: Path, ts: datetime) -> Path:
-    # Hive-style partitions: date=YYYY-MM-DD/hour=HH
-    return base / f"date={ts:%Y-%m-%d}" / f"hour={ts:%H}"
+def partition_prefix(base: str, ts: datetime) -> str:
+    return f"{base}/date={ts:%Y-%m-%d}/hour={ts:%H}"
 
 
-def atomic_write_parquet(df: pd.DataFrame, target_path: Path, compression: str) -> None:
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = target_path.with_suffix(target_path.suffix + ".tmp")
-
-    df.to_parquet(tmp_path, index=False, compression=compression)
-    # atomic rename on same filesystem
-    tmp_path.replace(target_path)
-
-
-def safe_write_json(path: Path, payload: Dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
-    tmp.replace(path)
+def build_filename(ts: datetime, seq: int) -> str:
+    return f"part-{ts:%Y%m%dT%H%M%SZ}-{seq:06d}.parquet"
 
 
 def normalize_states(states: List[List[Any]], snapshot_time: datetime) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     for st in states:
         row = dict(zip(COLUMNS, st))
-        # add ingestion metadata
         row["snapshot_time"] = snapshot_time
         rows.append(row)
     return rows
 
 
-def build_filename(prefix: str, ts: datetime, seq: int) -> str:
-    # Example: part-20251223T102233Z-000001.parquet
-    return f"{prefix}-{ts:%Y%m%dT%H%M%SZ}-{seq:06d}.parquet"
+def upload_parquet_to_blob(
+    df: pd.DataFrame,
+    container,
+    blob_path: str,
+    compression: str,
+) -> None:
+    buffer = io.BytesIO()
+    df.to_parquet(buffer, index=False, compression=compression)
+    buffer.seek(0)
+
+    blob = container.get_blob_client(blob_path)
+    blob.upload_blob(buffer, overwrite=True)
 
 
-# ----------------------------
-# Main loop
-# ----------------------------
+# -------------------------------------------------
+# Main
+# -------------------------------------------------
 def run(cfg: Config) -> None:
-    cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    if cfg.raw_dir:
-        cfg.raw_dir.mkdir(parents=True, exist_ok=True)
-
     session = build_session()
-    auth = (cfg.username, cfg.password) if (cfg.username and cfg.password) else None
+    auth = (cfg.username, cfg.password) if cfg.username and cfg.password else None
+    container = azure_blob_container(cfg.blob_container)
 
     buffer: List[Dict[str, Any]] = []
     last_flush = time.monotonic()
     seq = 0
 
-    # lightweight "metrics"
     total_rows = 0
     total_snapshots = 0
     total_failures = 0
 
     LOGGER.info(
-        "event=start poll_seconds=%.2f flush_rows=%d flush_seconds=%.2f out_dir=%s raw_dir=%s auth=%s",
+        "event=start poll_seconds=%.1f flush_rows=%d flush_seconds=%.1f container=%s prefix=%s",
         cfg.poll_seconds,
         cfg.flush_rows,
         cfg.flush_seconds,
-        str(cfg.out_dir),
-        str(cfg.raw_dir) if cfg.raw_dir else "none",
-        "yes" if auth else "no",
+        cfg.blob_container,
+        cfg.blob_prefix,
     )
 
     while not _STOP:
@@ -208,30 +215,21 @@ def run(cfg: Config) -> None:
 
         try:
             resp = session.get(cfg.url, timeout=cfg.timeout_seconds, auth=auth)
-            status = resp.status_code
 
-            # handle rate limiting explicitly
-            if status == 429:
+            if resp.status_code == 429:
                 total_failures += 1
-                retry_after = resp.headers.get("Retry-After")
-                sleep_for = float(retry_after) if retry_after and retry_after.isdigit() else max(cfg.poll_seconds, 15)
-                LOGGER.warning("event=rate_limited status=429 sleep=%.1f", sleep_for)
+                sleep_for = max(cfg.poll_seconds, 15)
+                LOGGER.warning("event=rate_limited sleep=%.1f", sleep_for)
                 time.sleep(sleep_for)
                 continue
 
-            if status >= 400:
+            if resp.status_code >= 400:
                 total_failures += 1
-                LOGGER.warning("event=http_error status=%d body_snippet=%s", status, resp.text[:120].replace("\n", " "))
+                LOGGER.warning("event=http_error status=%d", resp.status_code)
                 time.sleep(cfg.poll_seconds)
                 continue
 
             payload = resp.json()
-
-            # optional raw snapshot store (good for replay/debug)
-            if cfg.raw_dir:
-                raw_name = f"snapshot-{snapshot_time:%Y%m%dT%H%M%SZ}.json"
-                safe_write_json(cfg.raw_dir / raw_name, payload)
-
             states = payload.get("states") or []
             rows = normalize_states(states, snapshot_time)
 
@@ -239,76 +237,72 @@ def run(cfg: Config) -> None:
             total_rows += len(rows)
             total_snapshots += 1
 
-            api_latency_ms = (time.monotonic() - t0) * 1000.0
             LOGGER.info(
-                "event=snapshot_ok states=%d buffer=%d api_latency_ms=%.1f totals snapshots=%d rows=%d failures=%d",
+                "event=snapshot_ok states=%d buffer=%d totals snapshots=%d rows=%d failures=%d",
                 len(states),
                 len(buffer),
-                api_latency_ms,
                 total_snapshots,
                 total_rows,
                 total_failures,
             )
 
-        except (requests.Timeout, requests.ConnectionError) as e:
-            total_failures += 1
-            LOGGER.warning("event=request_error type=%s msg=%s", type(e).__name__, str(e))
-        except json.JSONDecodeError as e:
-            total_failures += 1
-            LOGGER.warning("event=json_decode_error msg=%s", str(e))
         except Exception as e:
             total_failures += 1
-            LOGGER.exception("event=unexpected_error msg=%s", str(e))
+            LOGGER.exception("event=request_failed msg=%s", str(e))
 
-        # Flush policy: by rows OR by time since last flush
-        should_flush = (len(buffer) >= cfg.flush_rows) or ((time.monotonic() - last_flush) >= cfg.flush_seconds and buffer)
+        should_flush = (
+            len(buffer) >= cfg.flush_rows
+            or (buffer and (time.monotonic() - last_flush) >= cfg.flush_seconds)
+        )
+
         if should_flush:
             seq += 1
             flush_ts = utc_now()
-            df = pd.DataFrame(buffer)
 
-            # basic hygiene (bronze): keep raw-ish, but remove exact duplicates
-            # NOTE: idempotency & dedupe "for real" should be done in silver.
-            df.drop_duplicates(inplace=True)
+            df = pd.DataFrame(buffer).drop_duplicates()
 
-            part_dir = partition_path(cfg.out_dir, flush_ts)
-            file_name = build_filename("part", flush_ts, seq)
-            out_path = part_dir / file_name
+            blob_path = (
+                f"{partition_prefix(cfg.blob_prefix, flush_ts)}/"
+                f"{build_filename(flush_ts, seq)}"
+            )
 
             try:
-                atomic_write_parquet(df, out_path, compression=cfg.parquet_compression)
+                upload_parquet_to_blob(
+                    df=df,
+                    container=container,
+                    blob_path=blob_path,
+                    compression=cfg.parquet_compression,
+                )
                 LOGGER.info(
-                    "event=flush_ok path=%s rows=%d columns=%d compression=%s",
-                    str(out_path),
+                    "event=flush_ok blob_path=%s rows=%d cols=%d",
+                    blob_path,
                     len(df),
                     len(df.columns),
-                    cfg.parquet_compression,
                 )
                 buffer.clear()
                 last_flush = time.monotonic()
             except Exception as e:
                 total_failures += 1
-                LOGGER.exception("event=flush_failed path=%s msg=%s", str(out_path), str(e))
-                # Don't clear buffer; try again next cycle.
+                LOGGER.exception("event=flush_failed blob_path=%s msg=%s", blob_path, str(e))
 
-        # Sleep remaining time (avoid drift)
         elapsed = time.monotonic() - t0
         sleep_for = max(0.0, cfg.poll_seconds - elapsed)
-        if sleep_for > 0:
+        if sleep_for:
             time.sleep(sleep_for)
 
-    # final flush on shutdown
     if buffer:
         seq += 1
         flush_ts = utc_now()
         df = pd.DataFrame(buffer).drop_duplicates()
-        part_dir = partition_path(cfg.out_dir, flush_ts)
-        out_path = part_dir / build_filename("part", flush_ts, seq)
+        blob_path = (
+            f"{partition_prefix(cfg.blob_prefix, flush_ts)}/"
+            f"{build_filename(flush_ts, seq)}"
+        )
         try:
-            atomic_write_parquet(df, out_path, compression=cfg.parquet_compression)
-            LOGGER.info("event=final_flush_ok path=%s rows=%d", str(out_path), len(df))
+            upload_parquet_to_blob(df, container, blob_path, cfg.parquet_compression)
+            LOGGER.info("event=final_flush_ok blob_path=%s rows=%d", blob_path, len(df))
         except Exception as e:
-            LOGGER.exception("event=final_flush_failed path=%s msg=%s", str(out_path), str(e))
+            LOGGER.exception("event=final_flush_failed msg=%s", str(e))
 
     LOGGER.warning(
         "event=stopped totals snapshots=%d rows=%d failures=%d",
@@ -319,5 +313,4 @@ def run(cfg: Config) -> None:
 
 
 if __name__ == "__main__":
-    cfg = Config()
-    run(cfg)
+    run(Config())

@@ -1,0 +1,22 @@
+# Envs / secrets
+.env
+**/.env
+
+# Python
+__pycache__/
+*.pyc
+.python-version
+.venv/
+.uv/
+
+# Local data (bronze / raw / etc)
+data/
+ingestion/data/
+loader/data/
+
+# Parquet / json snapshots
+*.parquet
+*.json
+
+# OS
+.DS_Store

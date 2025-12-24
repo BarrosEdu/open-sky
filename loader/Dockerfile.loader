@@ -5,9 +5,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY loader/requirements.loader.txt .
+COPY requirements.loader.txt .
 RUN pip install --no-cache-dir -r requirements.loader.txt
 
-COPY loader/loader.py .
+COPY loader.py .
+
+RUN useradd -m appuser
+USER appuser
 
 CMD ["python", "loader.py"]
