@@ -5,10 +5,10 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.ingest.txt .
+COPY ingestion/requirements.ingest.txt .
 RUN pip install --no-cache-dir -r requirements.ingest.txt
 
-COPY ingest.py api_auth.py .
+COPY ingestion/ingest.py ingestion/api_auth.py .
 
 RUN useradd -m appuser
 USER appuser

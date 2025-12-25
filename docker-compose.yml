@@ -63,6 +63,8 @@ services:
     container_name: opensky-ingest
     volumes:
       - ./ingestion/data:/data
+    env_file:
+      - .env
     environment:
       OPENSKY_OUT_DIR: "/data/bronze/open_sky"
       OPENSKY_POLL_SECONDS: "10"
@@ -91,4 +93,6 @@ services:
       - ingest
     networks:
       - internal
+    env_file:
+      - .env
     restart: always
