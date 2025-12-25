@@ -18,6 +18,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from azure.storage.blob import BlobServiceClient
 
+from api_auth import get_opensky_token
+
 # -------------------------------------------------
 # Environment
 # -------------------------------------------------
@@ -214,7 +216,13 @@ def run(cfg: Config) -> None:
         snapshot_time = utc_now()
 
         try:
-            resp = session.get(cfg.url, timeout=cfg.timeout_seconds, auth=auth)
+            token = get_opensky_token()
+            resp = session.get(
+                cfg.url,
+                timeout=cfg.timeout_seconds,
+                headers={"Authorization": f"Bearer {token}"},
+)
+
 
             if resp.status_code == 429:
                 total_failures += 1
