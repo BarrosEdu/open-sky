@@ -1,0 +1,42 @@
+name: Deploy OpenSky API to VM
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    # Só faz deploy se você escrever "please push" no commit
+    if: contains(github.event.head_commit.message, 'please push')
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VM_SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.VM_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy on VM
+        run: |
+          ssh ${{ secrets.VM_USER }}@${{ secrets.VM_HOST }} << 'EOF'
+            set -e
+
+            echo "📂 Going to project directory"
+            cd /home/azureuser/open-sky
+
+            echo "📥 Pulling latest code"
+            git pull origin main
+
+            echo "🐳 Rebuilding and restarting containers"
+            docker compose down
+            docker compose up -d --build
+
+            echo "✅ Deployment finished"
+          EOF

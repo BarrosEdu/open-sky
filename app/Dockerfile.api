@@ -1,5 +1,17 @@
 FROM python:3.12-slim
 
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    openssl \
+    libcurl4 \
+    curl \
+ && update-ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_DIR=/etc/ssl/certs
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
@@ -8,7 +20,7 @@ WORKDIR /app
 COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/app.py .
+COPY app/app.py app/historic_data.py .
 
 EXPOSE 8000
 

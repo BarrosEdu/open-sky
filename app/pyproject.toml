@@ -1,0 +1,16 @@
+[project]
+name = "app"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "azure-storage-blob>=12.27.1",
+    "duckdb>=1.4.3",
+    "fastapi>=0.127.1",
+    "pandas>=2.3.3",
+    "pyarrow>=22.0.0",
+    "python-dotenv>=1.2.1",
+    "redis>=7.1.0",
+    "uvicorn>=0.40.0",
+]
