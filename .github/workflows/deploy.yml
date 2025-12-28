@@ -16,6 +16,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+      - name: Debug secrets (safe)
+        run: |
+          echo "HOST is set? -> '${{ secrets.VM_HOST != '' }}'"
+          echo "USER is set? -> '${{ secrets.VM_USER != '' }}'"
+          echo "KEY is set?  -> '${{ secrets.VM_SSH_KEY != '' }}'"
 
       - name: Setup SSH
         run: |
