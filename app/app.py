@@ -25,6 +25,18 @@ r = redis.Redis(
 app = FastAPI()
 
 
+@app.get("/health")
+def health_check():
+    try:
+        r.ping()
+        return {"status": "healthy", "redis": "connected"}
+    except redis.exceptions.ConnectionError:
+        return JSONResponse(
+            status_code=503,
+            content={"status": "unhealthy", "redis": "disconnected"}
+        )
+
+
 def sanitize(obj):
     if isinstance(obj, pd.Timestamp):
         return obj.isoformat()
