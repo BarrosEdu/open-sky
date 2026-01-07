@@ -6,4 +6,3 @@ pandas
 numpy
 dotenv
 azure-storage-blob
-gunicorn
