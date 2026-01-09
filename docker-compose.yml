@@ -20,8 +20,7 @@ services:
     networks:
       - internal
     restart: always
-    mem_limit: 64m
-    cpus: 0.1
+
   
 
   # ----------------------------
@@ -44,9 +43,7 @@ services:
     networks:
       - internal
     restart: always
-    mem_limit: 512m
-    mem_reservation: 384m
-    cpus: 0.7
+
 
   # ----------------------------
   # Redis - INTERNO
@@ -59,8 +56,7 @@ services:
     networks:
       - internal
     restart: always
-    mem_limit: 128m
-    cpus: 0.2
+
 
   # ----------------------------
   # Ingest (OpenSky → Parquet)
@@ -83,8 +79,7 @@ services:
     networks:
       - internal
     restart: always
-    mem_limit: 128m
-    cpus: 0.3
+
 
   # ----------------------------
   # Loader (Parquet → Redis)
@@ -107,5 +102,4 @@ services:
     env_file:
       - .env
     restart: always
-    mem_limit: 128m
-    cpus: 0.2
+
